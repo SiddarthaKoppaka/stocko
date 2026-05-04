@@ -1,6 +1,6 @@
 universe:
   name: sp500_current
-  source: slickcharts_sp500
+  source: sp500_auto
 
 data:
   start: "2018-01-01"
