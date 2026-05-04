@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -7,6 +8,9 @@ import requests
 
 DEFAULT_SP500_URL = "https://www.slickcharts.com/sp500"
 WIKIPEDIA_SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+GITHUB_SP500_CSV_URL = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+)
 
 
 def load_universe(config: dict) -> list[str]:
@@ -29,15 +33,31 @@ def load_universe(config: dict) -> list[str]:
 
 def _load_sp500_auto() -> list[str]:
     """Load S&P 500 tickers with resilient fallbacks for notebook/cloud environments."""
-    try:
-        return _load_sp500_from_wikipedia()
-    except Exception:
-        return _load_sp500_from_slickcharts()
+    errors: list[str] = []
+    for loader in (
+        _load_sp500_from_wikipedia,
+        _load_sp500_from_slickcharts,
+        _load_sp500_from_github_csv,
+    ):
+        try:
+            tickers = loader()
+            if tickers:
+                return tickers
+            errors.append(f"{loader.__name__}: empty ticker list")
+        except Exception as exc:
+            errors.append(f"{loader.__name__}: {exc}")
+    raise RuntimeError("Unable to fetch S&P 500 universe. " + " | ".join(errors))
 
 
 def _load_sp500_from_wikipedia() -> list[str]:
     """Load S&P 500 symbols from Wikipedia constituents table."""
-    table = pd.read_html(WIKIPEDIA_SP500_URL)[0]
+    response = requests.get(
+        WIKIPEDIA_SP500_URL,
+        timeout=20,
+        headers=_browser_headers(),
+    )
+    response.raise_for_status()
+    table = pd.read_html(StringIO(response.text))[0]
     return table["Symbol"].tolist()
 
 
@@ -46,17 +66,33 @@ def _load_sp500_from_slickcharts() -> list[str]:
     response = requests.get(
         DEFAULT_SP500_URL,
         timeout=20,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        },
+        headers=_browser_headers(),
     )
     response.raise_for_status()
-    table = pd.read_html(response.text)[0]
+    table = pd.read_html(StringIO(response.text))[0]
     return table["Symbol"].tolist()
+
+
+def _load_sp500_from_github_csv() -> list[str]:
+    """Load S&P 500 symbols from a public GitHub dataset mirror."""
+    frame = pd.read_csv(GITHUB_SP500_CSV_URL)
+    if "Symbol" not in frame.columns:
+        raise ValueError("GitHub constituents CSV does not contain 'Symbol' column")
+    return frame["Symbol"].tolist()
+
+
+def _browser_headers() -> dict[str, str]:
+    """Headers that reduce 403 responses from anti-bot edge filters."""
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+    }
 
 
 def normalize_tickers(tickers: list[str]) -> list[str]:
