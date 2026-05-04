@@ -10,8 +10,10 @@ import torch.nn.functional as F
 
 from stock_manager.config import require_keys
 from stock_manager.models.lightgbm_alpha158 import _prediction_metrics, _write_training_outputs
+from stock_manager.utils.logging import get_logger, progress_iter
 
 EPSILON = 1e-12
+LOGGER = get_logger(__name__)
 
 
 def train_stockmixer_model(config: dict) -> dict[str, Path]:
@@ -22,13 +24,21 @@ def train_stockmixer_model(config: dict) -> dict[str, Path]:
     )
     frame = pd.read_parquet(Path(config["data"]["processed_path"]))
     frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
-    params = config.get("model", {}).get("params", {})
+    show_progress = config.get("runtime", {}).get("show_progress", True)
 
+    LOGGER.info("Preparing StockMixer arrays from %s", config["data"]["processed_path"])
     arrays = _build_stockmixer_arrays(frame, config)
-    bundle = _fit_stockmixer(arrays, config)
-    predictions = _predict_stockmixer(bundle, arrays)
+    LOGGER.info(
+        "StockMixer arrays ready: stocks=%s dates=%s lookback=%s",
+        len(arrays["tickers"]),
+        len(arrays["dates"]),
+        arrays["lookback_length"],
+    )
+    bundle = _fit_stockmixer(arrays, config, show_progress=show_progress)
+    predictions = _predict_stockmixer(bundle, arrays, show_progress=show_progress)
     metrics = _prediction_metrics(predictions)
     bundle["model"].to(torch.device("cpu"))
+    LOGGER.info("StockMixer training complete: rank_ic=%.4f mse=%.6f", metrics["rank_ic"], metrics["mse"])
     return _write_training_outputs("stockmixer", config, bundle["model"], predictions, metrics)
 
 
@@ -207,7 +217,7 @@ def _build_stockmixer_arrays(frame: pd.DataFrame, config: dict) -> dict:
     }
 
 
-def _fit_stockmixer(arrays: dict, config: dict) -> dict:
+def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
     params = config.get("model", {}).get("params", {})
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed = int(params.get("seed", 12345678))
@@ -228,11 +238,24 @@ def _fit_stockmixer(arrays: dict, config: dict) -> dict:
     batch_offsets = np.arange(start=0, stop=arrays["train_index"], dtype=int)
     best_state = model.state_dict()
     best_valid_loss = float("inf")
+    train_steps = max(0, arrays["train_index"] - arrays["lookback_length"] - arrays["steps"] + 1)
+    LOGGER.info("StockMixer training started: epochs=%s, train_steps=%s", epochs, train_steps)
 
-    for _ in range(epochs):
+    for epoch_index in progress_iter(
+        range(epochs),
+        total=epochs,
+        desc="StockMixer epochs",
+        enabled=show_progress,
+    ):
         np.random.shuffle(batch_offsets)
-        upper = arrays["train_index"] - arrays["lookback_length"] - arrays["steps"] + 1
-        for j in range(max(0, upper)):
+        upper = train_steps
+        train_losses = []
+        for j in progress_iter(
+            range(max(0, upper)),
+            total=max(0, upper),
+            desc=f"StockMixer epoch {epoch_index + 1}/{epochs}",
+            enabled=show_progress,
+        ):
             offset = int(batch_offsets[j])
             data_batch, mask_batch, price_batch, gt_batch = [
                 torch.tensor(item, dtype=torch.float32, device=device)
@@ -243,8 +266,17 @@ def _fit_stockmixer(arrays: dict, config: dict) -> dict:
             loss, _, _, _ = get_loss(prediction, gt_batch, price_batch, mask_batch, stock_num, alpha)
             loss.backward()
             optimizer.step()
+            train_losses.append(float(loss.item()))
 
         valid_loss, _ = _validate_stockmixer(model, arrays, arrays["train_index"], arrays["valid_index"], device, alpha)
+        mean_train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
+        LOGGER.info(
+            "StockMixer epoch %s/%s train_loss=%.6f valid_loss=%.6f",
+            epoch_index + 1,
+            epochs,
+            mean_train_loss,
+            valid_loss,
+        )
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
@@ -282,14 +314,24 @@ def _validate_stockmixer(
     return float(np.mean(losses)), _evaluate_stockmixer(current_pred, current_gt, current_mask)
 
 
-def _predict_stockmixer(bundle: dict, arrays: dict) -> pd.DataFrame:
+def _predict_stockmixer(bundle: dict, arrays: dict, *, show_progress: bool) -> pd.DataFrame:
     model = bundle["model"]
     device = bundle["device"]
     alpha = bundle["alpha"]
     start_index = arrays["valid_index"]
     end_index = arrays["test_index"]
     rows = []
-    for current_offset in range(start_index - arrays["lookback_length"] - arrays["steps"] + 1, end_index - arrays["lookback_length"] - arrays["steps"] + 1):
+    offsets = range(
+        start_index - arrays["lookback_length"] - arrays["steps"] + 1,
+        end_index - arrays["lookback_length"] - arrays["steps"] + 1,
+    )
+    total = max(0, end_index - start_index)
+    for current_offset in progress_iter(
+        offsets,
+        total=total,
+        desc="StockMixer inference",
+        enabled=show_progress,
+    ):
         batch_items = [torch.tensor(item, dtype=torch.float32, device=device) for item in _get_batch(arrays, current_offset)]
         data_batch, mask_batch, price_batch, gt_batch = batch_items
         with torch.no_grad():

@@ -5,9 +5,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from stock_manager.utils.logging import get_logger, progress_iter
+
 EPSILON = 1e-12
 DEFAULT_ROLLING_WINDOWS = (5, 10, 20, 30, 60)
 DEFAULT_LABEL_COLUMN = "LABEL0"
+LOGGER = get_logger(__name__)
 
 
 def build_alpha158_frame(
@@ -15,6 +18,7 @@ def build_alpha158_frame(
     *,
     label_column: str = DEFAULT_LABEL_COLUMN,
     vwap_mode: str = "typical_price",
+    show_progress: bool = True,
 ) -> pd.DataFrame:
     """Build the default Qlib Alpha158 factor set from daily bars.
 
@@ -37,14 +41,25 @@ def build_alpha158_frame(
     normalized = normalized.sort_values(["ticker", "date"]).reset_index(drop=True)
     normalized["vwap"] = _resolve_vwap(normalized, vwap_mode=vwap_mode)
 
+    ticker_count = normalized["ticker"].nunique()
+    LOGGER.info("Building Alpha158 features for %s tickers", ticker_count)
+
     per_ticker = []
-    for ticker, ticker_frame in normalized.groupby("ticker", sort=True):
+    grouped = normalized.groupby("ticker", sort=True)
+    for ticker, ticker_frame in progress_iter(
+        grouped,
+        total=ticker_count,
+        desc="Alpha158 factors",
+        enabled=show_progress,
+    ):
         features = _build_alpha158_for_ticker(ticker_frame, label_column=label_column)
         features.insert(0, "ticker", ticker)
         features.insert(0, "date", ticker_frame["date"].to_numpy())
         per_ticker.append(features)
 
-    return pd.concat(per_ticker, ignore_index=True)
+    result = pd.concat(per_ticker, ignore_index=True)
+    LOGGER.info("Alpha158 feature build complete: %s rows, %s columns", len(result), len(result.columns))
+    return result
 
 
 def write_alpha158_frame(
@@ -53,11 +68,19 @@ def write_alpha158_frame(
     *,
     label_column: str = DEFAULT_LABEL_COLUMN,
     vwap_mode: str = "typical_price",
+    show_progress: bool = True,
 ) -> Path:
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    alpha158 = build_alpha158_frame(frame, label_column=label_column, vwap_mode=vwap_mode)
+    LOGGER.info("Writing Alpha158 parquet to %s", output)
+    alpha158 = build_alpha158_frame(
+        frame,
+        label_column=label_column,
+        vwap_mode=vwap_mode,
+        show_progress=show_progress,
+    )
     alpha158.to_parquet(output, index=False)
+    LOGGER.info("Alpha158 parquet written to %s", output)
     return output
 
 

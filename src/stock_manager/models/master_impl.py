@@ -13,11 +13,13 @@ import torch.optim as optim
 
 from stock_manager.config import require_keys
 from stock_manager.models.lightgbm_alpha158 import _prediction_frame, _prediction_metrics, _write_training_outputs
+from stock_manager.utils.logging import get_logger, progress_iter
 
 EPSILON = 1e-12
 MASTER_FACTOR_COUNT = 158
 MASTER_MARKET_FEATURE_COUNT = 63
 MASTER_TOTAL_FEATURE_COUNT = MASTER_FACTOR_COUNT + MASTER_MARKET_FEATURE_COUNT
+LOGGER = get_logger(__name__)
 
 
 def train_master_model(config: dict) -> dict[str, Path]:
@@ -38,11 +40,32 @@ def train_master_model(config: dict) -> dict[str, Path]:
     market_source = pd.read_parquet(Path(config["data"]["market_source_path"]))
     label_column = config["data"]["label_column"]
     params = config.get("model", {}).get("params", {})
+    show_progress = config.get("runtime", {}).get("show_progress", True)
 
-    merged, feature_columns = _prepare_master_frame(feature_frame, market_source, label_column, config)
-    datasets = _build_master_datasets(merged, feature_columns, label_column, config)
-    model_bundle = _fit_master(datasets, feature_columns, config)
-    predictions = _predict_master(model_bundle, datasets.test, label_column)
+    LOGGER.info("Preparing MASTER training data from %s", config["data"]["processed_path"])
+
+    merged, feature_columns = _prepare_master_frame(
+        feature_frame,
+        market_source,
+        label_column,
+        config,
+        show_progress=show_progress,
+    )
+    datasets = _build_master_datasets(
+        merged,
+        feature_columns,
+        label_column,
+        config,
+        show_progress=show_progress,
+    )
+    LOGGER.info(
+        "MASTER datasets ready: train=%s valid=%s test=%s samples",
+        len(datasets.train),
+        len(datasets.valid),
+        len(datasets.test),
+    )
+    model_bundle = _fit_master(datasets, feature_columns, config, show_progress=show_progress)
+    predictions = _predict_master(model_bundle, datasets.test, label_column, show_progress=show_progress)
     metrics = _prediction_metrics(predictions)
     model_bundle.model.to(torch.device("cpu"))
     config.setdefault("model", {}).setdefault("params", {}).update(
@@ -53,6 +76,7 @@ def train_master_model(config: dict) -> dict[str, Path]:
             **params,
         }
     )
+    LOGGER.info("MASTER training complete: rank_ic=%.4f mse=%.6f", metrics["rank_ic"], metrics["mse"])
     return _write_training_outputs("master", config, model_bundle.model, predictions, metrics)
 
 
@@ -246,13 +270,20 @@ class MasterSequenceDataset:
         train_end: pd.Timestamp,
         valid_end: pd.Timestamp,
         test_end: pd.Timestamp,
+        show_progress: bool,
     ):
         records = []
         self.series: dict[str, np.ndarray] = {}
         self.feature_columns = feature_columns
         self.label_column = label_column
 
-        for ticker, ticker_frame in frame.groupby("ticker", sort=True):
+        grouped = frame.groupby("ticker", sort=True)
+        for ticker, ticker_frame in progress_iter(
+            grouped,
+            total=frame["ticker"].nunique(),
+            desc=f"MASTER {split_name} windows",
+            enabled=show_progress,
+        ):
             ticker_frame = ticker_frame.sort_values("date").reset_index(drop=True)
             values = ticker_frame.loc[:, [*feature_columns, label_column]].to_numpy(dtype=np.float32)
             dates = pd.to_datetime(ticker_frame["date"]).to_numpy()
@@ -306,6 +337,8 @@ def _prepare_master_frame(
     market_source: pd.DataFrame,
     label_column: str,
     config: dict,
+    *,
+    show_progress: bool,
 ) -> tuple[pd.DataFrame, list[str]]:
     frame = feature_frame.copy()
     frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
@@ -319,6 +352,7 @@ def _prepare_master_frame(
             f"MASTER expects {MASTER_FACTOR_COUNT} Alpha158 factors, found {len(factor_columns)}."
         )
 
+    LOGGER.info("Building MASTER market-information features")
     market_features = _build_market_information(market_source)
     merged = frame.merge(market_features, on="date", how="left")
 
@@ -327,6 +361,8 @@ def _prepare_master_frame(
     stats = _fit_robust_stats(merged.loc[merged["date"] <= train_end, feature_columns], feature_columns)
     merged.loc[:, feature_columns] = _apply_robust_stats(merged.loc[:, feature_columns], feature_columns, stats)
     merged.loc[:, feature_columns] = merged.loc[:, feature_columns].astype(np.float32)
+    if show_progress:
+        LOGGER.info("MASTER feature matrix ready: %s rows, %s columns", len(merged), len(feature_columns))
     return merged.sort_values(["ticker", "date"]).reset_index(drop=True), feature_columns
 
 
@@ -398,6 +434,8 @@ def _build_master_datasets(
     feature_columns: list[str],
     label_column: str,
     config: dict,
+    *,
+    show_progress: bool,
 ) -> MasterDatasets:
     lookback_window = int(config.get("model", {}).get("params", {}).get("lookback_window", 8))
     train_end = pd.Timestamp(config["splits"]["train_end"])
@@ -413,6 +451,7 @@ def _build_master_datasets(
             train_end=train_end,
             valid_end=valid_end,
             test_end=test_end,
+            show_progress=show_progress,
         ),
         valid=MasterSequenceDataset(
             frame,
@@ -423,6 +462,7 @@ def _build_master_datasets(
             train_end=train_end,
             valid_end=valid_end,
             test_end=test_end,
+            show_progress=show_progress,
         ),
         test=MasterSequenceDataset(
             frame,
@@ -433,11 +473,18 @@ def _build_master_datasets(
             train_end=train_end,
             valid_end=valid_end,
             test_end=test_end,
+            show_progress=show_progress,
         ),
     )
 
 
-def _fit_master(datasets: MasterDatasets, feature_columns: list[str], config: dict) -> MasterBundle:
+def _fit_master(
+    datasets: MasterDatasets,
+    feature_columns: list[str],
+    config: dict,
+    *,
+    show_progress: bool,
+) -> MasterBundle:
     params = config.get("model", {}).get("params", {})
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed = int(params.get("seed", 0))
@@ -458,15 +505,30 @@ def _fit_master(datasets: MasterDatasets, feature_columns: list[str], config: di
     optimizer = optim.Adam(model.parameters(), lr=float(params.get("lr", 8e-6)))
     train_stop_loss_thred = float(params.get("train_stop_loss_thred", 0.95))
     n_epochs = int(params.get("n_epochs", 40))
+    LOGGER.info("MASTER training started: epochs=%s, train batches=%s", n_epochs, len(datasets.train.day_slices))
 
     best_state = copy.deepcopy(model.state_dict())
     best_loss = float("inf")
-    for _ in range(n_epochs):
-        train_loss = _train_master_epoch(model, optimizer, datasets.train, device)
+    for epoch_index in progress_iter(
+        range(n_epochs),
+        total=n_epochs,
+        desc="MASTER epochs",
+        enabled=show_progress,
+    ):
+        train_loss = _train_master_epoch(
+            model,
+            optimizer,
+            datasets.train,
+            device,
+            show_progress=show_progress,
+            epoch_label=f"MASTER epoch {epoch_index + 1}/{n_epochs}",
+        )
+        LOGGER.info("MASTER epoch %s/%s train_loss=%.6f", epoch_index + 1, n_epochs, train_loss)
         if train_loss < best_loss:
             best_loss = train_loss
             best_state = copy.deepcopy(model.state_dict())
         if train_loss <= train_stop_loss_thred:
+            LOGGER.info("MASTER early stop threshold reached at epoch %s", epoch_index + 1)
             break
     model.load_state_dict(best_state)
     return MasterBundle(model=model, device=device)
@@ -477,10 +539,19 @@ def _train_master_epoch(
     optimizer: optim.Optimizer,
     dataset: MasterSequenceDataset,
     device: torch.device,
+    *,
+    show_progress: bool,
+    epoch_label: str,
 ) -> float:
     model.train()
     losses: list[float] = []
-    for batch, _ in dataset.iter_batches(shuffle=True, drop_last=True):
+    batch_iterator = dataset.iter_batches(shuffle=True, drop_last=True)
+    for batch, _ in progress_iter(
+        batch_iterator,
+        total=len(dataset.day_slices),
+        desc=epoch_label,
+        enabled=show_progress,
+    ):
         tensor = torch.tensor(batch, dtype=torch.float32, device=device)
         features = tensor[:, :, :-1]
         labels = tensor[:, -1, -1]
@@ -501,10 +572,22 @@ def _train_master_epoch(
     return float(np.mean(losses))
 
 
-def _predict_master(model_bundle: MasterBundle, dataset: MasterSequenceDataset, label_column: str) -> pd.DataFrame:
+def _predict_master(
+    model_bundle: MasterBundle,
+    dataset: MasterSequenceDataset,
+    label_column: str,
+    *,
+    show_progress: bool,
+) -> pd.DataFrame:
     model_bundle.model.eval()
     rows = []
-    for batch, batch_index in dataset.iter_batches(shuffle=False, drop_last=False):
+    batch_iterator = dataset.iter_batches(shuffle=False, drop_last=False)
+    for batch, batch_index in progress_iter(
+        batch_iterator,
+        total=len(dataset.day_slices),
+        desc="MASTER inference",
+        enabled=show_progress,
+    ):
         tensor = torch.tensor(batch, dtype=torch.float32, device=model_bundle.device)
         features = tensor[:, :, :-1]
         labels = tensor[:, -1, -1].detach().cpu().numpy()

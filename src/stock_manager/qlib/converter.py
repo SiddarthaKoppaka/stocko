@@ -8,6 +8,7 @@ import pandas as pd
 
 from stock_manager.config import require_keys
 from stock_manager.features.alpha158 import DEFAULT_LABEL_COLUMN, write_alpha158_frame
+from stock_manager.utils.logging import get_logger, progress_iter
 from stock_manager.utils.paths import ensure_dir
 
 QLIB_FIELDS = ["open", "high", "low", "close", "volume", "factor"]
@@ -15,6 +16,7 @@ INSTRUMENTS_FILE_NAME = "all.txt"
 INSTRUMENTS_SEP = "\t"
 START_FIELD = "start_datetime"
 END_FIELD = "end_datetime"
+LOGGER = get_logger(__name__)
 
 
 def build_qlib_dataset(config: dict) -> dict[str, Path]:
@@ -31,6 +33,8 @@ def build_qlib_dataset(config: dict) -> dict[str, Path]:
     processed_path = Path(config["data"]["processed_path"])
     provider_uri = ensure_dir(config["qlib"]["provider_uri"])
     mode = config.get("qlib", {}).get("mode", "all")
+    show_progress = config.get("runtime", {}).get("show_progress", True)
+    LOGGER.info("Building Qlib dataset from %s into %s (mode=%s)", processed_path, provider_uri, mode)
     frame = pd.read_parquet(processed_path)
     required = {"date", "ticker", "open", "high", "low", "close", "volume"}
     missing = required.difference(frame.columns)
@@ -41,15 +45,16 @@ def build_qlib_dataset(config: dict) -> dict[str, Path]:
     if mode == "all":
         _reset_provider_uri(provider_uri)
         calendar_list = sorted(frame["date"].unique())
-        instrument_rows = _dump_all(frame, provider_uri, calendar_list)
+        instrument_rows = _dump_all(frame, provider_uri, calendar_list, show_progress=show_progress)
     elif mode == "update":
-        instrument_rows, calendar_list = _dump_update(frame, provider_uri)
+        instrument_rows, calendar_list = _dump_update(frame, provider_uri, show_progress=show_progress)
     else:
         raise ValueError(f"Unsupported qlib dump mode: {mode}")
 
-    alpha158_path = _build_alpha158_artifact(config, provider_uri, frame)
+    alpha158_path = _build_alpha158_artifact(config, provider_uri, frame, show_progress=show_progress)
     _save_calendars(provider_uri / "calendars" / "day.txt", calendar_list)
     _save_instruments(provider_uri / "instruments" / INSTRUMENTS_FILE_NAME, instrument_rows)
+    LOGGER.info("Qlib dataset build complete: %s symbols, %s calendar rows", len(instrument_rows), len(calendar_list))
     return {
         "provider_uri": provider_uri,
         "calendar": provider_uri / "calendars" / "day.txt",
@@ -73,10 +78,23 @@ def _reset_provider_uri(provider_uri: Path) -> None:
             shutil.rmtree(path)
 
 
-def _dump_all(frame: pd.DataFrame, provider_uri: Path, calendar_list: list[pd.Timestamp]) -> list[dict[str, str]]:
+def _dump_all(
+    frame: pd.DataFrame,
+    provider_uri: Path,
+    calendar_list: list[pd.Timestamp],
+    *,
+    show_progress: bool,
+) -> list[dict[str, str]]:
     instrument_rows: list[dict[str, str]] = []
     features_dir = ensure_dir(provider_uri / "features")
-    for symbol, symbol_frame in frame.groupby("symbol", sort=True):
+    grouped = frame.groupby("symbol", sort=True)
+    symbol_count = frame["symbol"].nunique()
+    for symbol, symbol_frame in progress_iter(
+        grouped,
+        total=symbol_count,
+        desc="Qlib feature bins",
+        enabled=show_progress,
+    ):
         symbol_frame = symbol_frame.drop_duplicates(subset=["date"]).sort_values("date")
         _write_symbol_bins(symbol_frame, features_dir / symbol.lower(), calendar_list, append=False)
         instrument_rows.append(
@@ -90,7 +108,10 @@ def _dump_all(frame: pd.DataFrame, provider_uri: Path, calendar_list: list[pd.Ti
 
 
 def _dump_update(
-    frame: pd.DataFrame, provider_uri: Path
+    frame: pd.DataFrame,
+    provider_uri: Path,
+    *,
+    show_progress: bool,
 ) -> tuple[list[dict[str, str]], list[pd.Timestamp]]:
     calendar_path = provider_uri / "calendars" / "day.txt"
     instruments_path = provider_uri / "instruments" / INSTRUMENTS_FILE_NAME
@@ -106,7 +127,14 @@ def _dump_update(
     instrument_map = {row["symbol"]: row for row in instrument_rows}
     features_dir = ensure_dir(provider_uri / "features")
 
-    for symbol, symbol_frame in frame.groupby("symbol", sort=True):
+    grouped = frame.groupby("symbol", sort=True)
+    symbol_count = frame["symbol"].nunique()
+    for symbol, symbol_frame in progress_iter(
+        grouped,
+        total=symbol_count,
+        desc="Qlib incremental bins",
+        enabled=show_progress,
+    ):
         symbol_frame = symbol_frame.drop_duplicates(subset=["date"]).sort_values("date")
         if symbol in instrument_map:
             existing_end = pd.Timestamp(instrument_map[symbol][END_FIELD])
@@ -195,7 +223,13 @@ def _format_datetime(value: pd.Timestamp) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
-def _build_alpha158_artifact(config: dict, provider_uri: Path, frame: pd.DataFrame) -> Path:
+def _build_alpha158_artifact(
+    config: dict,
+    provider_uri: Path,
+    frame: pd.DataFrame,
+    *,
+    show_progress: bool,
+) -> Path:
     alpha_cfg = config.get("qlib", {}).get("alpha158", {})
     output_path = Path(
         alpha_cfg.get(
@@ -211,5 +245,6 @@ def _build_alpha158_artifact(config: dict, provider_uri: Path, frame: pd.DataFra
         output_path,
         label_column=label_column,
         vwap_mode=vwap_mode,
+        show_progress=show_progress,
     )
 

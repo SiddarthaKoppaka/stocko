@@ -8,9 +8,11 @@ import pandas as pd
 
 from stock_manager.config import require_keys
 from stock_manager.reporting.artifacts import run_metadata, write_json, write_predictions
+from stock_manager.utils.logging import get_logger
 from stock_manager.utils.paths import ensure_dir
 
 MIN_ALPHA158_FEATURES = 100
+LOGGER = get_logger(__name__)
 
 
 def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
@@ -33,16 +35,29 @@ def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
     feature_columns = _feature_columns(frame, label)
     _assert_alpha158_feature_contract(feature_columns, config)
     train, valid, test = _chronological_split(frame, config["splits"])
+    LOGGER.info(
+        "LightGBM Alpha158 training: train=%s valid=%s test=%s rows, features=%s",
+        len(train),
+        len(valid),
+        len(test),
+        len(feature_columns),
+    )
 
     model = lgb.LGBMRegressor(**config.get("model", {}).get("params", {}))
+    callbacks = []
+    if config.get("runtime", {}).get("show_progress", True) and hasattr(lgb, "log_evaluation"):
+        report_period = max(1, int(config.get("model", {}).get("params", {}).get("n_estimators", 100)) // 10)
+        callbacks.append(lgb.log_evaluation(period=report_period))
     model.fit(
         train[feature_columns],
         train[label],
         eval_set=[(valid[feature_columns], valid[label])],
         eval_metric="l2",
+        callbacks=callbacks,
     )
     predictions = _prediction_frame(test, model.predict(test[feature_columns]), label)
     metrics = _prediction_metrics(predictions)
+    LOGGER.info("LightGBM Alpha158 training complete: rank_ic=%.4f mse=%.6f", metrics["rank_ic"], metrics["mse"])
     return _write_training_outputs("lightgbm_alpha158", config, model, predictions, metrics)
 
 
