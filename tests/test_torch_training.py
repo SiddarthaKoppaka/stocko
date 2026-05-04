@@ -97,6 +97,49 @@ def test_master_training_smoke(tmp_path: Path) -> None:
     assert set(predictions.columns) == {"date", "ticker", "prediction", "label"}
 
 
+def test_master_training_requires_label_column(tmp_path: Path) -> None:
+    raw_frame, feature_frame, dates = _make_synthetic_frames()
+    raw_path = tmp_path / "raw.parquet"
+    alpha_path = tmp_path / "alpha_missing_label.parquet"
+    raw_frame.to_parquet(raw_path, index=False)
+    feature_frame.drop(columns=["LABEL0"]).to_parquet(alpha_path, index=False)
+
+    with pytest.raises(ValueError, match="includes the configured label column 'LABEL0'"):
+        train_master_model(
+            {
+                "data": {
+                    "processed_path": str(alpha_path),
+                    "market_source_path": str(raw_path),
+                    "label_column": "LABEL0",
+                },
+                "splits": {
+                    "train_end": str(dates[18].date()),
+                    "valid_end": str(dates[26].date()),
+                    "test_end": str(dates[-2].date()),
+                },
+                "paths": {
+                    "model_dir": str(tmp_path / "models"),
+                    "report_dir": str(tmp_path / "reports"),
+                },
+                "model": {
+                    "params": {
+                        "lookback_window": 4,
+                        "d_model": 32,
+                        "t_nhead": 2,
+                        "s_nhead": 2,
+                        "t_dropout_rate": 0.1,
+                        "s_dropout_rate": 0.1,
+                        "beta": 2.0,
+                        "n_epochs": 1,
+                        "lr": 1e-3,
+                        "train_stop_loss_thred": 0.0,
+                        "seed": 7,
+                    }
+                },
+            }
+        )
+
+
 def test_stockmixer_training_smoke(tmp_path: Path) -> None:
     raw_frame, _, dates = _make_synthetic_frames()
     raw_path = tmp_path / "raw.parquet"

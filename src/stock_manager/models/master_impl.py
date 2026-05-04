@@ -36,13 +36,16 @@ def train_master_model(config: dict) -> dict[str, Path]:
         context="master config",
     )
 
-    feature_frame = pd.read_parquet(Path(config["data"]["processed_path"]))
+    feature_path = Path(config["data"]["processed_path"])
+    feature_frame = pd.read_parquet(feature_path)
     market_source = pd.read_parquet(Path(config["data"]["market_source_path"]))
     label_column = config["data"]["label_column"]
     params = config.get("model", {}).get("params", {})
     show_progress = config.get("runtime", {}).get("show_progress", True)
 
     LOGGER.info("Preparing MASTER training data from %s", config["data"]["processed_path"])
+
+    _validate_master_feature_frame(feature_frame, label_column, feature_path)
 
     merged, feature_columns = _prepare_master_frame(
         feature_frame,
@@ -78,6 +81,23 @@ def train_master_model(config: dict) -> dict[str, Path]:
     )
     LOGGER.info("MASTER training complete: rank_ic=%.4f mse=%.6f", metrics["rank_ic"], metrics["mse"])
     return _write_training_outputs("master", config, model_bundle.model, predictions, metrics)
+
+
+def _validate_master_feature_frame(
+    feature_frame: pd.DataFrame,
+    label_column: str,
+    feature_path: Path,
+) -> None:
+    if label_column in feature_frame.columns:
+        return
+
+    available = ", ".join(sorted(feature_frame.columns[:10]))
+    raise ValueError(
+        "MASTER expects a materialized Alpha158 parquet that includes the configured label column "
+        f"'{label_column}', but it was not found in {feature_path}. Rebuild the Alpha158 artifact "
+        "from the notebook's Qlib Dataset Build step or rerun the dataset builder before training. "
+        f"Sample columns: {available}"
+    )
 
 
 @dataclass
