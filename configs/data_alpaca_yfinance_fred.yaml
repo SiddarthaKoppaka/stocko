@@ -1,0 +1,18 @@
+universe:
+  name: sp500_current
+  source: slickcharts_sp500
+
+data:
+  start: "2018-01-01"
+  end: "2025-12-31"
+  providers: ["alpaca", "yfinance"]
+  label_horizon: 5
+
+fred:
+  enabled: false
+  series: ["DGS10", "DFF", "VIXCLS"]
+
+paths:
+  raw_dir: "${STOCK_MANAGER_DATA_DIR}/raw"
+  processed_dir: "${STOCK_MANAGER_DATA_DIR}/processed"
+

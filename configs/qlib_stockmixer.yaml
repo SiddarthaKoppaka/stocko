@@ -1,0 +1,23 @@
+model:
+  type: stockmixer
+  params:
+    alpha: 1.0
+  official_repo: https://github.com/SJTU-DMTai/StockMixer
+
+data:
+  processed_path: "${STOCK_MANAGER_DATA_DIR}/processed/ohlcv_labeled.parquet"
+  label_column: label_5d
+
+qlib:
+  provider_uri: "${STOCK_MANAGER_DATA_DIR}/qlib/us_equities"
+  market: sp500_current
+
+splits:
+  train_end: "2022-12-31"
+  valid_end: "2023-12-31"
+  test_end: "2025-12-31"
+
+paths:
+  model_dir: "${STOCK_MANAGER_MODEL_DIR}"
+  report_dir: "${STOCK_MANAGER_REPORT_DIR}/stockmixer"
+

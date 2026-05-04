@@ -1,0 +1,6 @@
+universe:
+  name: nasdaq100_current
+  source: inline
+  tickers: []
+  enabled: false
+

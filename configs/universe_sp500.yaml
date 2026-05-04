@@ -1,0 +1,5 @@
+universe:
+  name: sp500_current
+  source: slickcharts_sp500
+  survivorship_bias_warning: true
+

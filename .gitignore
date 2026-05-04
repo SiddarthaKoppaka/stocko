@@ -1,0 +1,62 @@
+# Environment & secrets
+.env
+.env.*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated research artifacts
+data/
+models/
+reports/
+*.pkl
+*.pickle
+*.parquet
+*.csv
+*.feather
+*.bin
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Build & packaging
+dist/
+build/
+*.egg-info/
+*.egg
+*.whl
+MANIFEST
+
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/

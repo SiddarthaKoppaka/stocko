@@ -1,0 +1,10 @@
+report_dir: "${STOCK_MANAGER_REPORT_DIR}/comparison"
+cost_bps: [0, 5, 10]
+models:
+  - name: lightgbm_alpha158
+    predictions_path: "${STOCK_MANAGER_REPORT_DIR}/lightgbm_alpha158/lightgbm_alpha158_predictions.parquet"
+  - name: master
+    predictions_path: "${STOCK_MANAGER_REPORT_DIR}/master/master_predictions.parquet"
+  - name: stockmixer
+    predictions_path: "${STOCK_MANAGER_REPORT_DIR}/stockmixer/stockmixer_predictions.parquet"
+
