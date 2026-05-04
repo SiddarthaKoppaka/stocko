@@ -10,7 +10,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from stock_manager.models.master_impl import train_master_model
-from stock_manager.models.stockmixer_impl import train_stockmixer_model
+from stock_manager.models.stockmixer_impl import _build_stockmixer_arrays, train_stockmixer_model
 
 
 def _make_synthetic_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
@@ -178,3 +178,27 @@ def test_stockmixer_training_smoke(tmp_path: Path) -> None:
     predictions = pd.read_parquet(outputs["predictions"])
     assert not predictions.empty
     assert set(predictions.columns) == {"date", "ticker", "prediction", "label"}
+
+
+def test_stockmixer_array_builder_normalizes_inputs() -> None:
+    raw_frame, _, dates = _make_synthetic_frames()
+    arrays = _build_stockmixer_arrays(
+        raw_frame,
+        {
+            "splits": {
+                "train_end": str(dates[18].date()),
+                "valid_end": str(dates[26].date()),
+                "test_end": str(dates[-2].date()),
+            },
+            "model": {
+                "params": {
+                    "lookback_length": 4,
+                    "steps": 1,
+                    "normalization_window": 5,
+                }
+            },
+        },
+    )
+
+    assert np.isfinite(arrays["eod_data"]).all()
+    assert float(np.nanmax(np.abs(arrays["eod_data"]))) < 5.0

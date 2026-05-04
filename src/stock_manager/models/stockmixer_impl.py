@@ -173,25 +173,30 @@ def _build_stockmixer_arrays(frame: pd.DataFrame, config: dict) -> dict:
     if missing:
         raise ValueError(f"StockMixer requires OHLCV columns: {', '.join(sorted(missing))}")
 
-    dates = pd.Index(sorted(frame["date"].unique()))
-    tickers = sorted(frame["ticker"].astype(str).unique())
-    feature_columns = ["open", "high", "low", "close", "volume"]
+    params = config.get("model", {}).get("params", {})
+    normalized = _normalize_stockmixer_frame(
+        frame,
+        normalization_window=int(params.get("normalization_window", 20)),
+    )
+    dates = pd.Index(sorted(normalized["date"].unique()))
+    tickers = sorted(normalized["ticker"].astype(str).unique())
+    feature_columns = ["open_input", "high_input", "low_input", "close_input", "volume_input"]
     pivots = [
-        frame.pivot(index="date", columns="ticker", values=column).reindex(index=dates, columns=tickers)
+        normalized.pivot(index="date", columns="ticker", values=column).reindex(index=dates, columns=tickers)
         for column in feature_columns
     ]
     eod_data = np.stack([pivot.T.to_numpy(dtype=np.float32) for pivot in pivots], axis=-1)
     mask_data = (~np.isnan(eod_data).any(axis=2)).astype(np.float32)
-    close_index = feature_columns.index("close")
-    price_data = eod_data[:, :, close_index].copy()
+    price_data = normalized.pivot(index="date", columns="ticker", values="close").reindex(index=dates, columns=tickers)
+    price_data = price_data.T.to_numpy(dtype=np.float32)
     gt_data = np.full_like(price_data, np.nan, dtype=np.float32)
-    steps = int(config.get("model", {}).get("params", {}).get("steps", 1))
+    steps = int(params.get("steps", 1))
     for row in range(steps, price_data.shape[1]):
         previous = price_data[:, row - steps]
         current = price_data[:, row]
         valid = (mask_data[:, row] > 0.5) & (mask_data[:, row - steps] > 0.5)
         gt_data[valid, row] = (current[valid] - previous[valid]) / (previous[valid] + EPSILON)
-    eod_data = np.nan_to_num(eod_data, nan=1.1, posinf=1.1, neginf=1.1)
+    eod_data = np.nan_to_num(eod_data, nan=0.0, posinf=0.0, neginf=0.0)
 
     train_end = pd.Timestamp(config["splits"]["train_end"])
     valid_end = pd.Timestamp(config["splits"]["valid_end"])
@@ -215,6 +220,28 @@ def _build_stockmixer_arrays(frame: pd.DataFrame, config: dict) -> dict:
         "lookback_length": int(config.get("model", {}).get("params", {}).get("lookback_length", 16)),
         "steps": steps,
     }
+
+
+def _normalize_stockmixer_frame(frame: pd.DataFrame, *, normalization_window: int) -> pd.DataFrame:
+    if normalization_window <= 0:
+        raise ValueError("StockMixer normalization_window must be positive")
+
+    result = frame.copy()
+    result = result.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    close_anchor = result.groupby("ticker", group_keys=False)["close"].transform(
+        lambda series: series.rolling(normalization_window, min_periods=1).mean().shift(1)
+    )
+    close_anchor = close_anchor.fillna(result["close"])
+    volume_anchor = result.groupby("ticker", group_keys=False)["volume"].transform(
+        lambda series: series.rolling(normalization_window, min_periods=1).mean().shift(1)
+    )
+    volume_anchor = volume_anchor.fillna(result["volume"])
+
+    for column in ("open", "high", "low", "close"):
+        result[f"{column}_input"] = ((result[column] / (close_anchor + EPSILON)) - 1.0).clip(-5.0, 5.0)
+    result["volume_input"] = np.log1p(result["volume"] / (volume_anchor + EPSILON)).clip(-5.0, 5.0)
+    return result
 
 
 def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
@@ -264,7 +291,11 @@ def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
             optimizer.zero_grad()
             prediction = model(data_batch)
             loss, _, _, _ = get_loss(prediction, gt_batch, price_batch, mask_batch, stock_num, alpha)
+            if not torch.isfinite(loss):
+                LOGGER.warning("Skipping non-finite StockMixer batch loss at offset=%s", offset)
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
             train_losses.append(float(loss.item()))
 
@@ -306,11 +337,15 @@ def _validate_stockmixer(
         with torch.no_grad():
             prediction = model(data_batch)
             loss, _, _, return_ratio = get_loss(prediction, gt_batch, price_batch, mask_batch, stock_num, alpha)
+        if not torch.isfinite(loss):
+            continue
         losses.append(float(loss.item()))
         position = current_offset - (start_index - arrays["lookback_length"] - arrays["steps"] + 1)
         current_pred[:, position] = return_ratio[:, 0].detach().cpu().numpy()
         current_gt[:, position] = gt_batch[:, 0].detach().cpu().numpy()
         current_mask[:, position] = mask_batch[:, 0].detach().cpu().numpy()
+    if not losses:
+        return float("inf"), {}
     return float(np.mean(losses)), _evaluate_stockmixer(current_pred, current_gt, current_mask)
 
 

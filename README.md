@@ -5,7 +5,7 @@ Research-only US equities training and backtesting pipeline. v1 trains models, c
 ## Scope
 
 - Universe: current S&P 500 constituents for v1.
-- Target: 5-trading-day forward return, `close[t + 5] / close[t] - 1`.
+- Target: 5-trading-day forward return, then cross-sectionally clipped and z-scored per date for model training.
 - Models: LightGBM + Alpha158 baseline, MASTER adapter, StockMixer adapter.
 - Backtesting: research comparison only, with 0, 5, and 10 bps cost cases.
 

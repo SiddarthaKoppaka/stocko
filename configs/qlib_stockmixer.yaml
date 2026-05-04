@@ -5,6 +5,7 @@ model:
     steps: 1
     epochs: 100
     learning_rate: 0.001
+    normalization_window: 20
     alpha: 0.1
     market_hidden_dim: 20
     scale_factor: 3

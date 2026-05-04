@@ -522,7 +522,7 @@ def _fit_master(
         gate_input_end_index=len(feature_columns),
         beta=float(params.get("beta", 2.0)),
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=float(params.get("lr", 8e-6)))
+    optimizer = optim.Adam(model.parameters(), lr=float(params.get("lr", 1e-4)))
     train_stop_loss_thred = float(params.get("train_stop_loss_thred", 0.95))
     n_epochs = int(params.get("n_epochs", 40))
     LOGGER.info("MASTER training started: epochs=%s, train batches=%s", n_epochs, len(datasets.train.day_slices))

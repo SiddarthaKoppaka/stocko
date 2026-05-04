@@ -10,6 +10,8 @@ from stock_manager.utils.logging import get_logger, progress_iter
 EPSILON = 1e-12
 DEFAULT_ROLLING_WINDOWS = (5, 10, 20, 30, 60)
 DEFAULT_LABEL_COLUMN = "LABEL0"
+DEFAULT_LABEL_HORIZON = 5
+DEFAULT_LABEL_CLIP_QUANTILES = (0.025, 0.975)
 LOGGER = get_logger(__name__)
 
 
@@ -17,7 +19,10 @@ def build_alpha158_frame(
     frame: pd.DataFrame,
     *,
     label_column: str = DEFAULT_LABEL_COLUMN,
+    label_horizon: int = DEFAULT_LABEL_HORIZON,
     vwap_mode: str = "typical_price",
+    normalize_label: bool = True,
+    clip_quantiles: tuple[float, float] | None = DEFAULT_LABEL_CLIP_QUANTILES,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """Build the default Qlib Alpha158 factor set from daily bars.
@@ -35,6 +40,8 @@ def build_alpha158_frame(
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Missing required Alpha158 columns: {', '.join(sorted(missing))}")
+    if label_horizon <= 0:
+        raise ValueError("Alpha158 label_horizon must be positive")
 
     normalized = frame.copy()
     normalized["date"] = pd.to_datetime(normalized["date"]).dt.tz_localize(None)
@@ -52,12 +59,22 @@ def build_alpha158_frame(
         desc="Alpha158 factors",
         enabled=show_progress,
     ):
-        features = _build_alpha158_for_ticker(ticker_frame, label_column=label_column)
+        features = _build_alpha158_for_ticker(
+            ticker_frame,
+            label_column=label_column,
+            label_horizon=label_horizon,
+        )
         features.insert(0, "ticker", ticker)
         features.insert(0, "date", ticker_frame["date"].to_numpy())
         per_ticker.append(features)
 
     result = pd.concat(per_ticker, ignore_index=True)
+    result = _process_label_cross_section(
+        result,
+        label_column=label_column,
+        normalize_label=normalize_label,
+        clip_quantiles=clip_quantiles,
+    )
     LOGGER.info("Alpha158 feature build complete: %s rows, %s columns", len(result), len(result.columns))
     return result
 
@@ -67,7 +84,10 @@ def write_alpha158_frame(
     output_path: str | Path,
     *,
     label_column: str = DEFAULT_LABEL_COLUMN,
+    label_horizon: int = DEFAULT_LABEL_HORIZON,
     vwap_mode: str = "typical_price",
+    normalize_label: bool = True,
+    clip_quantiles: tuple[float, float] | None = DEFAULT_LABEL_CLIP_QUANTILES,
     show_progress: bool = True,
 ) -> Path:
     output = Path(output_path)
@@ -76,7 +96,10 @@ def write_alpha158_frame(
     alpha158 = build_alpha158_frame(
         frame,
         label_column=label_column,
+        label_horizon=label_horizon,
         vwap_mode=vwap_mode,
+        normalize_label=normalize_label,
+        clip_quantiles=clip_quantiles,
         show_progress=show_progress,
     )
     alpha158.to_parquet(output, index=False)
@@ -99,7 +122,12 @@ def _resolve_vwap(frame: pd.DataFrame, *, vwap_mode: str) -> pd.Series:
     raise ValueError(f"Unsupported Alpha158 VWAP mode: {vwap_mode}")
 
 
-def _build_alpha158_for_ticker(frame: pd.DataFrame, *, label_column: str) -> pd.DataFrame:
+def _build_alpha158_for_ticker(
+    frame: pd.DataFrame,
+    *,
+    label_column: str,
+    label_horizon: int,
+) -> pd.DataFrame:
     open_ = frame["open"].astype(float)
     high = frame["high"].astype(float)
     low = frame["low"].astype(float)
@@ -187,8 +215,53 @@ def _build_alpha158_for_ticker(frame: pd.DataFrame, *, label_column: str) -> pd.
             - (-volume_delta.clip(upper=0)).rolling(window).sum()
         ) / (abs_volume_delta_sum + EPSILON)
 
-    features[label_column] = close.shift(-2) / (close.shift(-1) + EPSILON) - 1.0
+    features[label_column] = close.shift(-label_horizon) / (close + EPSILON) - 1.0
     return pd.DataFrame(features)
+
+
+def _process_label_cross_section(
+    frame: pd.DataFrame,
+    *,
+    label_column: str,
+    normalize_label: bool,
+    clip_quantiles: tuple[float, float] | None,
+) -> pd.DataFrame:
+    result = frame.copy()
+    label = result[label_column].astype(float)
+
+    if clip_quantiles is not None:
+        lower_quantile, upper_quantile = clip_quantiles
+        if not 0.0 <= lower_quantile < upper_quantile <= 1.0:
+            raise ValueError("Alpha158 label clip quantiles must satisfy 0 <= lower < upper <= 1")
+        label = label.groupby(result["date"]).transform(
+            lambda series: _clip_cross_section(series, lower_quantile, upper_quantile)
+        )
+
+    if normalize_label:
+        label = label.groupby(result["date"]).transform(_zscore_cross_section)
+
+    result[label_column] = label.replace([np.inf, -np.inf], np.nan)
+    return result
+
+
+def _clip_cross_section(series: pd.Series, lower_quantile: float, upper_quantile: float) -> pd.Series:
+    valid = series.dropna()
+    if len(valid) < 20:
+        return series
+    lower = float(valid.quantile(lower_quantile))
+    upper = float(valid.quantile(upper_quantile))
+    return series.clip(lower=lower, upper=upper)
+
+
+def _zscore_cross_section(series: pd.Series) -> pd.Series:
+    valid = series.dropna()
+    if valid.empty:
+        return series
+    centered = series - float(valid.mean())
+    std = float(valid.std(ddof=0))
+    if not np.isfinite(std) or std <= EPSILON:
+        return centered.where(series.notna())
+    return (centered / std).where(series.notna())
 
 
 def _rolling_regression(series: pd.Series, window: int, kind: str) -> pd.Series:

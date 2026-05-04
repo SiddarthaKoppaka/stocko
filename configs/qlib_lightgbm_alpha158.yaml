@@ -3,6 +3,7 @@ model:
   params:
     n_estimators: 200
     learning_rate: 0.05
+    early_stopping_rounds: 20
     num_leaves: 31
     subsample: 0.8
     colsample_bytree: 0.8
@@ -16,6 +17,10 @@ qlib:
   provider_uri: "${STOCK_MANAGER_DATA_DIR}/qlib/us_equities"
   market: sp500_current
   feature_set: Alpha158
+  alpha158:
+    label_horizon: 5
+    normalize_label: true
+    clip_quantiles: [0.025, 0.975]
 
 splits:
   train_end: "2022-12-31"

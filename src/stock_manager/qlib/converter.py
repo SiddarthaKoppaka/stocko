@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 
 from stock_manager.config import require_keys
-from stock_manager.features.alpha158 import DEFAULT_LABEL_COLUMN, write_alpha158_frame
+from stock_manager.features.alpha158 import (
+    DEFAULT_LABEL_CLIP_QUANTILES,
+    DEFAULT_LABEL_COLUMN,
+    DEFAULT_LABEL_HORIZON,
+    write_alpha158_frame,
+)
 from stock_manager.utils.logging import get_logger, progress_iter
 from stock_manager.utils.paths import ensure_dir
 
@@ -238,13 +243,21 @@ def _build_alpha158_artifact(
         )
     )
     label_column = alpha_cfg.get("label_column", DEFAULT_LABEL_COLUMN)
+    label_horizon = int(alpha_cfg.get("label_horizon", config.get("data", {}).get("label_horizon", DEFAULT_LABEL_HORIZON)))
     vwap_mode = alpha_cfg.get("vwap_mode", "typical_price")
+    normalize_label = bool(alpha_cfg.get("normalize_label", True))
+    clip_quantiles = alpha_cfg.get("clip_quantiles", DEFAULT_LABEL_CLIP_QUANTILES)
+    if isinstance(clip_quantiles, list):
+        clip_quantiles = tuple(clip_quantiles)
     source_frame = frame.rename(columns={"symbol": "ticker"}).copy()
     return write_alpha158_frame(
         source_frame,
         output_path,
         label_column=label_column,
+        label_horizon=label_horizon,
         vwap_mode=vwap_mode,
+        normalize_label=normalize_label,
+        clip_quantiles=clip_quantiles,
         show_progress=show_progress,
     )
 

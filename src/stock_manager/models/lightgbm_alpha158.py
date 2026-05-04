@@ -12,6 +12,7 @@ from stock_manager.utils.logging import get_logger
 from stock_manager.utils.paths import ensure_dir
 
 MIN_ALPHA158_FEATURES = 100
+DEFAULT_EARLY_STOPPING_ROUNDS = 20
 LOGGER = get_logger(__name__)
 
 
@@ -43,10 +44,14 @@ def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
         len(feature_columns),
     )
 
-    model = lgb.LGBMRegressor(**config.get("model", {}).get("params", {}))
+    model_params = dict(config.get("model", {}).get("params", {}))
+    early_stopping_rounds = int(model_params.pop("early_stopping_rounds", DEFAULT_EARLY_STOPPING_ROUNDS) or 0)
+    model = lgb.LGBMRegressor(**model_params)
     callbacks = []
+    if early_stopping_rounds > 0 and hasattr(lgb, "early_stopping"):
+        callbacks.append(lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False))
     if config.get("runtime", {}).get("show_progress", True) and hasattr(lgb, "log_evaluation"):
-        report_period = max(1, int(config.get("model", {}).get("params", {}).get("n_estimators", 100)) // 10)
+        report_period = max(1, int(model_params.get("n_estimators", 100)) // 10)
         callbacks.append(lgb.log_evaluation(period=report_period))
     model.fit(
         train[feature_columns],
@@ -55,9 +60,21 @@ def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
         eval_metric="l2",
         callbacks=callbacks,
     )
-    predictions = _prediction_frame(test, model.predict(test[feature_columns]), label)
+    best_iteration = getattr(model, "best_iteration_", None)
+    if best_iteration is not None and best_iteration <= 0:
+        best_iteration = None
+    predictions = _prediction_frame(
+        test,
+        model.predict(test[feature_columns], num_iteration=best_iteration),
+        label,
+    )
     metrics = _prediction_metrics(predictions)
-    LOGGER.info("LightGBM Alpha158 training complete: rank_ic=%.4f mse=%.6f", metrics["rank_ic"], metrics["mse"])
+    LOGGER.info(
+        "LightGBM Alpha158 training complete: rank_ic=%.4f mse=%.6f best_iteration=%s",
+        metrics["rank_ic"],
+        metrics["mse"],
+        best_iteration or model_params.get("n_estimators"),
+    )
     return _write_training_outputs("lightgbm_alpha158", config, model, predictions, metrics)
 
 
