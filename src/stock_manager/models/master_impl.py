@@ -523,12 +523,14 @@ def _fit_master(
         beta=float(params.get("beta", 2.0)),
     ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=float(params.get("lr", 1e-4)))
-    train_stop_loss_thred = float(params.get("train_stop_loss_thred", 0.95))
     n_epochs = int(params.get("n_epochs", 40))
+    early_stopping_patience = int(params.get("early_stopping_patience", 5))
+    min_improvement = float(params.get("early_stopping_min_delta", 1e-4))
     LOGGER.info("MASTER training started: epochs=%s, train batches=%s", n_epochs, len(datasets.train.day_slices))
 
     best_state = copy.deepcopy(model.state_dict())
-    best_loss = float("inf")
+    best_valid_loss = float("inf")
+    stale_epochs = 0
     for epoch_index in progress_iter(
         range(n_epochs),
         total=n_epochs,
@@ -543,13 +545,29 @@ def _fit_master(
             show_progress=show_progress,
             epoch_label=f"MASTER epoch {epoch_index + 1}/{n_epochs}",
         )
-        LOGGER.info("MASTER epoch %s/%s train_loss=%.6f", epoch_index + 1, n_epochs, train_loss)
-        if train_loss < best_loss:
-            best_loss = train_loss
+        valid_loss = _evaluate_master_epoch(
+            model,
+            datasets.valid,
+            device,
+            show_progress=show_progress,
+            epoch_label=f"MASTER valid {epoch_index + 1}/{n_epochs}",
+        )
+        LOGGER.info(
+            "MASTER epoch %s/%s train_loss=%.6f valid_loss=%.6f",
+            epoch_index + 1,
+            n_epochs,
+            train_loss,
+            valid_loss,
+        )
+        if valid_loss + min_improvement < best_valid_loss:
+            best_valid_loss = valid_loss
             best_state = copy.deepcopy(model.state_dict())
-        if train_loss <= train_stop_loss_thred:
-            LOGGER.info("MASTER early stop threshold reached at epoch %s", epoch_index + 1)
-            break
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if early_stopping_patience > 0 and stale_epochs >= early_stopping_patience:
+                LOGGER.info("MASTER early stopping triggered at epoch %s", epoch_index + 1)
+                break
     model.load_state_dict(best_state)
     return MasterBundle(model=model, device=device)
 
@@ -575,21 +593,51 @@ def _train_master_epoch(
         tensor = torch.tensor(batch, dtype=torch.float32, device=device)
         features = tensor[:, :, :-1]
         labels = tensor[:, -1, -1]
-        mask = _drop_extreme(labels)
-        if mask.sum() == 0:
+        valid_mask = torch.isfinite(labels)
+        if valid_mask.sum() == 0:
             continue
-        labels = _zscore(labels[mask])
-        features = features[mask]
+        labels = labels[valid_mask]
+        features = features[valid_mask]
         prediction = model(features)
         loss = torch.mean((prediction - labels) ** 2)
         losses.append(float(loss.item()))
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_value_(model.parameters(), 3.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
         optimizer.step()
     if not losses:
         raise ValueError("MASTER training produced no valid batches")
     return float(np.mean(losses))
+
+
+def _evaluate_master_epoch(
+    model: nn.Module,
+    dataset: MasterSequenceDataset,
+    device: torch.device,
+    *,
+    show_progress: bool,
+    epoch_label: str,
+) -> float:
+    model.eval()
+    losses: list[float] = []
+    batch_iterator = dataset.iter_batches(shuffle=False, drop_last=False)
+    for batch, _ in progress_iter(
+        batch_iterator,
+        total=len(dataset.day_slices),
+        desc=epoch_label,
+        enabled=show_progress,
+    ):
+        tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+        features = tensor[:, :, :-1]
+        labels = tensor[:, -1, -1]
+        valid_mask = torch.isfinite(labels)
+        if valid_mask.sum() == 0:
+            continue
+        with torch.no_grad():
+            prediction = model(features[valid_mask])
+            loss = torch.mean((prediction - labels[valid_mask]) ** 2)
+        losses.append(float(loss.item()))
+    return float(np.mean(losses)) if losses else float("inf")
 
 
 def _predict_master(
@@ -624,26 +672,6 @@ def _predict_master(
     if not rows:
         raise ValueError("MASTER test split is empty")
     return pd.concat(rows, ignore_index=True)
-
-
-def _drop_extreme(labels: torch.Tensor) -> torch.Tensor:
-    sorted_values, indices = labels.sort()
-    size = labels.shape[0]
-    cutoff = int(0.025 * size)
-    if cutoff == 0 or size - cutoff <= cutoff:
-        return ~torch.isnan(labels)
-    keep = indices[cutoff : size - cutoff]
-    mask = torch.zeros_like(labels, dtype=torch.bool)
-    mask[keep] = True
-    mask &= ~torch.isnan(labels)
-    return mask
-
-
-def _zscore(labels: torch.Tensor) -> torch.Tensor:
-    std = labels.std(unbiased=False)
-    if torch.isnan(std) or std <= 0:
-        return labels - labels.mean()
-    return (labels - labels.mean()) / std
 
 
 def _daily_slices(index: pd.MultiIndex) -> list[tuple[int, int]]:

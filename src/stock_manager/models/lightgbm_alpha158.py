@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from stock_manager.backtest.metrics import rank_ic
 from stock_manager.config import require_keys
 from stock_manager.reporting.artifacts import run_metadata, write_json, write_predictions
 from stock_manager.utils.logging import get_logger
@@ -150,9 +151,8 @@ def _prediction_frame(test: pd.DataFrame, prediction: np.ndarray, label: str) ->
 
 
 def _prediction_metrics(predictions: pd.DataFrame) -> dict[str, float]:
-    corr = predictions[["prediction", "label"]].corr(method="spearman").iloc[0, 1]
     mse = float(np.mean((predictions["prediction"] - predictions["label"]) ** 2))
-    return {"rank_ic": float(corr) if not np.isnan(corr) else 0.0, "mse": mse}
+    return {"rank_ic": rank_ic(predictions), "mse": mse}
 
 
 def _write_training_outputs(

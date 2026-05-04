@@ -55,12 +55,22 @@ def get_loss(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = prediction.device
     all_one = torch.ones(batch_size, 1, dtype=torch.float32, device=device)
-    return_ratio = (prediction - base_price) / (base_price + EPSILON)
-    reg_loss = F.mse_loss(return_ratio * mask, ground_truth * mask)
+    safe_mask = mask * torch.isfinite(ground_truth).to(mask.dtype) * torch.isfinite(base_price).to(mask.dtype)
+    safe_prediction = torch.nan_to_num(prediction, nan=0.0, posinf=0.0, neginf=0.0)
+    safe_ground_truth = torch.where(safe_mask > 0, ground_truth, torch.zeros_like(ground_truth))
+    safe_base_price = torch.where(safe_mask > 0, base_price, torch.ones_like(base_price))
+    return_ratio = torch.where(
+        safe_mask > 0,
+        (safe_prediction - safe_base_price) / (safe_base_price + EPSILON),
+        torch.zeros_like(safe_prediction),
+    )
+    valid_count = safe_mask.sum().clamp_min(1.0)
+    reg_loss = (((return_ratio - safe_ground_truth) ** 2) * safe_mask).sum() / valid_count
     pre_pw_dif = return_ratio @ all_one.t() - all_one @ return_ratio.t()
-    gt_pw_dif = all_one @ ground_truth.t() - ground_truth @ all_one.t()
-    mask_pw = mask @ mask.t()
-    rank_loss = torch.mean(F.relu(pre_pw_dif * gt_pw_dif * mask_pw))
+    gt_pw_dif = all_one @ safe_ground_truth.t() - safe_ground_truth @ all_one.t()
+    mask_pw = safe_mask @ safe_mask.t()
+    pair_count = mask_pw.sum().clamp_min(1.0)
+    rank_loss = (F.relu(pre_pw_dif * gt_pw_dif) * mask_pw).sum() / pair_count
     loss = reg_loss + alpha * rank_loss
     return loss, reg_loss, rank_loss, return_ratio
 
@@ -397,11 +407,15 @@ def _get_batch(arrays: dict, offset: int) -> tuple[np.ndarray, np.ndarray, np.nd
     steps = arrays["steps"]
     mask_batch = arrays["mask_data"][:, offset : offset + seq_len + steps]
     mask_batch = np.min(mask_batch, axis=1, keepdims=True)
+    price_batch = np.expand_dims(arrays["price_data"][:, offset + seq_len - 1], axis=1)
+    gt_batch = np.expand_dims(arrays["gt_data"][:, offset + seq_len + steps - 1], axis=1)
+    finite_mask = np.isfinite(price_batch).astype(np.float32) * np.isfinite(gt_batch).astype(np.float32)
+    mask_batch = mask_batch * finite_mask
     return (
         arrays["eod_data"][:, offset : offset + seq_len, :],
         mask_batch,
-        np.expand_dims(arrays["price_data"][:, offset + seq_len - 1], axis=1),
-        np.expand_dims(arrays["gt_data"][:, offset + seq_len + steps - 1], axis=1),
+        np.nan_to_num(price_batch, nan=1.0, posinf=1.0, neginf=1.0),
+        np.nan_to_num(gt_batch, nan=0.0, posinf=0.0, neginf=0.0),
     )
 
 

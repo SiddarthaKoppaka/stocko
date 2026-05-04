@@ -10,7 +10,8 @@ model:
     beta: 2.0
     n_epochs: 40
     lr: 1.0e-04
-    train_stop_loss_thred: 0.95
+    early_stopping_patience: 5
+    early_stopping_min_delta: 1.0e-04
     seed: 0
   official_repo: https://github.com/SJTU-DMTai/MASTER
 

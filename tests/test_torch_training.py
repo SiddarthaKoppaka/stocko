@@ -10,7 +10,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from stock_manager.models.master_impl import train_master_model
-from stock_manager.models.stockmixer_impl import _build_stockmixer_arrays, train_stockmixer_model
+from stock_manager.models.stockmixer_impl import _build_stockmixer_arrays, get_loss, train_stockmixer_model
 
 
 def _make_synthetic_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DatetimeIndex]:
@@ -84,7 +84,7 @@ def test_master_training_smoke(tmp_path: Path) -> None:
                     "beta": 2.0,
                     "n_epochs": 1,
                     "lr": 1e-3,
-                    "train_stop_loss_thred": 0.0,
+                    "early_stopping_patience": 0,
                     "seed": 7,
                 }
             },
@@ -132,7 +132,7 @@ def test_master_training_requires_label_column(tmp_path: Path) -> None:
                         "beta": 2.0,
                         "n_epochs": 1,
                         "lr": 1e-3,
-                        "train_stop_loss_thred": 0.0,
+                        "early_stopping_patience": 0,
                         "seed": 7,
                     }
                 },
@@ -202,3 +202,24 @@ def test_stockmixer_array_builder_normalizes_inputs() -> None:
 
     assert np.isfinite(arrays["eod_data"]).all()
     assert float(np.nanmax(np.abs(arrays["eod_data"]))) < 5.0
+
+
+def test_stockmixer_loss_ignores_masked_nans() -> None:
+    prediction = torch.tensor([[100.0], [105.0]], dtype=torch.float32)
+    ground_truth = torch.tensor([[0.05], [float("nan")]], dtype=torch.float32)
+    base_price = torch.tensor([[100.0], [float("nan")]], dtype=torch.float32)
+    mask = torch.tensor([[1.0], [0.0]], dtype=torch.float32)
+
+    loss, reg_loss, rank_loss, return_ratio = get_loss(
+        prediction,
+        ground_truth,
+        base_price,
+        mask,
+        batch_size=2,
+        alpha=0.1,
+    )
+
+    assert torch.isfinite(loss)
+    assert torch.isfinite(reg_loss)
+    assert torch.isfinite(rank_loss)
+    assert torch.isfinite(return_ratio).all()
