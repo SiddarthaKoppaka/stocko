@@ -10,13 +10,11 @@ from stock_manager.config import require_keys
 from stock_manager.reporting.artifacts import run_metadata, write_json, write_predictions
 from stock_manager.utils.paths import ensure_dir
 
+MIN_ALPHA158_FEATURES = 100
+
 
 def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
-    """Train a LightGBM baseline from processed labeled data.
-
-    This is the local baseline path. A full Qlib Alpha158 workflow can be wired through this
-    adapter while preserving the same artifact contract.
-    """
+    """Train LightGBM on a precomputed Alpha158-style feature matrix."""
     require_keys(
         config,
         ["data.processed_path", "splits.train_end", "splits.valid_end", "paths.model_dir"],
@@ -33,6 +31,7 @@ def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
     frame = _load_training_frame(config)
     label = config.get("data", {}).get("label_column", "label_5d")
     feature_columns = _feature_columns(frame, label)
+    _assert_alpha158_feature_contract(feature_columns, config)
     train, valid, test = _chronological_split(frame, config["splits"])
 
     model = lgb.LGBMRegressor(**config.get("model", {}).get("params", {}))
@@ -50,7 +49,10 @@ def train_lightgbm_alpha158(config: dict) -> dict[str, Path]:
 def _load_training_frame(config: dict) -> pd.DataFrame:
     frame = pd.read_parquet(Path(config["data"]["processed_path"]))
     frame["date"] = pd.to_datetime(frame["date"]).dt.tz_localize(None)
-    return frame.sort_values(["date", "ticker"]).reset_index(drop=True)
+    label = config.get("data", {}).get("label_column", "label_5d")
+    if label not in frame.columns:
+        raise ValueError(f"Configured label column not found in training frame: {label}")
+    return frame.dropna(subset=[label]).sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
 def _feature_columns(frame: pd.DataFrame, label: str) -> list[str]:
@@ -62,6 +64,31 @@ def _feature_columns(frame: pd.DataFrame, label: str) -> list[str]:
     if not numeric_features:
         raise ValueError("No numeric feature columns available for training")
     return numeric_features
+
+
+def _assert_alpha158_feature_contract(feature_columns: list[str], config: dict) -> None:
+    """Fail loudly when the so-called Alpha158 runner only sees raw OHLCV columns.
+
+    This guard preserves an escape hatch for smoke tests or intentional raw-feature baselines,
+    but the default behavior is truthful: `lightgbm_alpha158` should not silently run on five
+    raw price/volume inputs and present itself as Alpha158.
+    """
+    if config.get("model", {}).get("allow_raw_feature_baseline", False):
+        return
+
+    min_feature_count = int(
+        config.get("qlib", {}).get("min_feature_count", MIN_ALPHA158_FEATURES)
+    )
+    if len(feature_columns) >= min_feature_count:
+        return
+
+    sample = ", ".join(feature_columns[:10])
+    raise NotImplementedError(
+        "lightgbm_alpha158 requires a precomputed Alpha158-style feature matrix, but only "
+        f"{len(feature_columns)} numeric features were found (expected >= {min_feature_count}). "
+        f"Found columns: {sample}. Build real Alpha158 features first or set "
+        "model.allow_raw_feature_baseline=true only for smoke tests."
+    )
 
 
 def _chronological_split(

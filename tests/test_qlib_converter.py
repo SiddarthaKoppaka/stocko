@@ -29,4 +29,11 @@ def test_build_qlib_dataset_writes_expected_layout(tmp_path):
 
     assert outputs["calendar"].exists()
     assert outputs["instruments"].exists()
-    assert (tmp_path / "qlib" / "features" / "aapl" / "factor.csv").exists()
+    assert outputs["alpha158"].exists()
+    assert (tmp_path / "qlib" / "features" / "aapl" / "factor.day.bin").exists()
+    assert (tmp_path / "qlib" / "features" / "aapl" / "close.day.bin").stat().st_size > 0
+
+    alpha158 = pd.read_parquet(outputs["alpha158"])
+    assert {"date", "ticker", "LABEL0", "KMID", "ROC5", "VSUMD60"}.issubset(alpha158.columns)
+    feature_columns = [col for col in alpha158.columns if col not in {"date", "ticker", "LABEL0"}]
+    assert len(feature_columns) == 158

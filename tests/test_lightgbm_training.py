@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from stock_manager.models import train_from_config
+from stock_manager.qlib import build_qlib_dataset
 
 
 def test_lightgbm_tiny_training_smoke(tmp_path):
@@ -35,6 +36,16 @@ def test_lightgbm_tiny_training_smoke(tmp_path):
             )
     pd.DataFrame(rows).to_parquet(processed, index=False)
 
+    qlib_outputs = build_qlib_dataset(
+        {
+            "data": {"processed_path": str(processed)},
+            "qlib": {
+                "provider_uri": str(tmp_path / "qlib"),
+                "alpha158": {"output_path": str(tmp_path / "processed" / "alpha158.parquet")},
+            },
+        }
+    )
+
     outputs = train_from_config(
         {
             "model": {
@@ -47,7 +58,7 @@ def test_lightgbm_tiny_training_smoke(tmp_path):
                     "random_state": 42,
                 },
             },
-            "data": {"processed_path": str(processed), "label_column": "label_5d"},
+            "data": {"processed_path": str(qlib_outputs["alpha158"]), "label_column": "LABEL0"},
             "splits": {
                 "train_end": "2020-12-31",
                 "valid_end": "2021-12-31",

@@ -9,8 +9,8 @@ model:
     random_state: 42
 
 data:
-  processed_path: "${STOCK_MANAGER_DATA_DIR}/processed/ohlcv_labeled.parquet"
-  label_column: label_5d
+  processed_path: "${STOCK_MANAGER_DATA_DIR}/qlib/us_equities/alpha158.parquet"
+  label_column: LABEL0
 
 qlib:
   provider_uri: "${STOCK_MANAGER_DATA_DIR}/qlib/us_equities"
