@@ -19,9 +19,6 @@ htmlcov/
 .ipynb_checkpoints/
 
 # Generated research artifacts
-data/
-models/
-reports/
 *.pkl
 *.pickle
 *.parquet
