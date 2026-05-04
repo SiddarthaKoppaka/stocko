@@ -14,8 +14,22 @@ def download_yfinance_bars(
     start: str | date,
     end: str | date,
 ) -> pd.DataFrame:
-    """Download daily OHLCV bars from yfinance."""
+    """Download daily OHLCV bars from yfinance.
+
+    Compatible with yfinance >=0.2 which returns MultiIndex columns when
+    downloading a single ticker with group_by='ticker'.  We download one
+    ticker at a time and squeeze any 2-D single-column Series to 1-D.
+    """
     import yfinance as yf
+
+    def _squeeze(series_or_frame) -> pd.Series:
+        """Flatten a 1-column DataFrame or MultiIndex Series to a plain Series."""
+        if isinstance(series_or_frame, pd.DataFrame):
+            return series_or_frame.iloc[:, 0]
+        # MultiIndex Series — drop the ticker level
+        if isinstance(series_or_frame.index, pd.MultiIndex):
+            return series_or_frame.droplevel(0)
+        return series_or_frame
 
     frames: list[pd.DataFrame] = []
     for ticker in tickers:
@@ -25,21 +39,27 @@ def download_yfinance_bars(
             end=str(end),
             auto_adjust=False,
             progress=False,
-            threads=False,
+            multi_level_index=False,  # yfinance >=0.2.48: flat columns for single ticker
         )
         if data.empty:
             continue
+        # Flatten MultiIndex columns if present (yfinance < 0.2.48 or group_by default)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = [col[0] if col[1] == ticker else "_".join(col).strip("_")
+                            for col in data.columns]
         data = data.reset_index()
+        # Column name normalisation — yfinance uses "Adj Close" or "Close"
+        close_col = "Adj Close" if "Adj Close" in data.columns else "Close"
         frames.append(
             pd.DataFrame(
                 {
-                    "date": data["Date"],
+                    "date":   _squeeze(data["Date"]),
                     "ticker": ticker,
-                    "open": data["Open"],
-                    "high": data["High"],
-                    "low": data["Low"],
-                    "close": data.get("Adj Close", data["Close"]),
-                    "volume": data["Volume"],
+                    "open":   _squeeze(data["Open"]),
+                    "high":   _squeeze(data["High"]),
+                    "low":    _squeeze(data["Low"]),
+                    "close":  _squeeze(data[close_col]),
+                    "volume": _squeeze(data["Volume"]),
                 }
             )
         )
