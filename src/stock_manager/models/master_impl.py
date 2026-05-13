@@ -498,6 +498,35 @@ def _build_master_datasets(
     )
 
 
+def _build_optimizer(model: nn.Module, params: dict, default_lr: float = 1e-4) -> optim.Optimizer:
+    """Create an optimizer from the params dict.
+
+    Supported keys:
+      optimizer   : "adam" (default) | "adamw" | "sgd" | "rmsprop"
+      lr          : learning rate (float)
+      weight_decay: L2 regularisation (float, default 0)
+      momentum    : momentum for SGD / RMSprop (float, default 0.9)
+    """
+    opt_name = str(params.get("optimizer", "adam")).lower()
+    lr = float(params.get("lr", default_lr))
+    wd = float(params.get("weight_decay", 0.0))
+    momentum = float(params.get("momentum", 0.9))
+    if opt_name == "adamw":
+        return optim.AdamW(model.parameters(), lr=lr, weight_decay=wd if wd > 0 else 1e-2)
+    if opt_name == "sgd":
+        return optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    if opt_name == "rmsprop":
+        return optim.RMSprop(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    # default: adam
+    return optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+
+def _clip_grads(model: nn.Module, params: dict) -> None:
+    max_norm = float(params.get("grad_clip", 3.0))
+    if max_norm > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+
+
 def _fit_master(
     datasets: MasterDatasets,
     feature_columns: list[str],
@@ -522,10 +551,11 @@ def _fit_master(
         gate_input_end_index=len(feature_columns),
         beta=float(params.get("beta", 2.0)),
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=float(params.get("lr", 1e-4)))
+    optimizer = _build_optimizer(model, params, default_lr=1e-4)
     n_epochs = int(params.get("n_epochs", 40))
     early_stopping_patience = int(params.get("early_stopping_patience", 5))
     min_improvement = float(params.get("early_stopping_min_delta", 1e-4))
+    grad_clip = float(params.get("grad_clip", 3.0))
     LOGGER.info("MASTER training started: epochs=%s, train batches=%s", n_epochs, len(datasets.train.day_slices))
 
     best_state = copy.deepcopy(model.state_dict())
@@ -544,6 +574,7 @@ def _fit_master(
             device,
             show_progress=show_progress,
             epoch_label=f"MASTER epoch {epoch_index + 1}/{n_epochs}",
+            grad_clip=grad_clip,
         )
         valid_loss = _evaluate_master_epoch(
             model,
@@ -580,6 +611,7 @@ def _train_master_epoch(
     *,
     show_progress: bool,
     epoch_label: str,
+    grad_clip: float = 3.0,
 ) -> float:
     model.train()
     losses: list[float] = []
@@ -603,7 +635,7 @@ def _train_master_epoch(
         losses.append(float(loss.item()))
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()
     if not losses:
         raise ValueError("MASTER training produced no valid batches")

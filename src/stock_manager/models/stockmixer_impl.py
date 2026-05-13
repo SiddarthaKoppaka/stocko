@@ -254,6 +254,29 @@ def _normalize_stockmixer_frame(frame: pd.DataFrame, *, normalization_window: in
     return result
 
 
+def _build_stockmixer_optimizer(model: nn.Module, params: dict) -> torch.optim.Optimizer:
+    """Create an optimizer from the params dict.
+
+    Supported keys:
+      optimizer   : "adam" (default) | "adamw" | "sgd" | "rmsprop"
+      learning_rate: learning rate (float, default 0.001)
+      weight_decay : L2 regularisation (float, default 0)
+      momentum     : momentum for SGD / RMSprop (float, default 0.9)
+    """
+    opt_name = str(params.get("optimizer", "adam")).lower()
+    lr = float(params.get("learning_rate", 0.001))
+    wd = float(params.get("weight_decay", 0.0))
+    momentum = float(params.get("momentum", 0.9))
+    if opt_name == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd if wd > 0 else 1e-2)
+    if opt_name == "sgd":
+        return torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    if opt_name == "rmsprop":
+        return torch.optim.RMSprop(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+    # default: adam
+    return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+
 def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
     params = config.get("model", {}).get("params", {})
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -269,9 +292,10 @@ def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
         market=int(params.get("market_hidden_dim", 20)),
         scale=int(params.get("scale_factor", 3)),
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(params.get("learning_rate", 0.001)))
+    optimizer = _build_stockmixer_optimizer(model, params)
     epochs = int(params.get("epochs", 100))
     alpha = float(params.get("alpha", 0.1))
+    grad_clip = float(params.get("grad_clip", 5.0))
     batch_offsets = np.arange(start=0, stop=arrays["train_index"], dtype=int)
     best_state = model.state_dict()
     best_valid_loss = float("inf")
@@ -305,7 +329,8 @@ def _fit_stockmixer(arrays: dict, config: dict, *, show_progress: bool) -> dict:
                 LOGGER.warning("Skipping non-finite StockMixer batch loss at offset=%s", offset)
                 continue
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
             optimizer.step()
             train_losses.append(float(loss.item()))
 
